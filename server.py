@@ -10,7 +10,11 @@ from nacl.encoding import HexEncoder
 
 app = FastAPI()
 
+
 KEYGEN_API_TOKEN = os.environ["KEYGEN_API_TOKEN"]
+
+KEYGEN_TOKEN = os.environ["KEYGEN_API_TOKEN"]    
+
 ACCOUNT_ID = os.environ["ACCOUNT_ID"]
 POLICY_ID = os.environ["POLICY_ID"]
 LEASE_SECONDS = int(os.getenv("LEASE_SECONDS", "86400"))  # 24h by default
