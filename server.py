@@ -6,7 +6,7 @@ from nacl.encoding import RawEncoder
 
 app = FastAPI()
 
-KEYGEN_TOKEN = os.environ["KEYGEN_API_TOKEN"]    # prod-f4394350d89cdd1ca473c20c5be8837f9b97a40f308c9251e200d76d51eaefdbv3
+KEYGEN_TOKEN = os.environ["KEYGEN_API_TOKEN"]    
 ACCOUNT_ID = os.environ["ACCOUNT_ID"]
 POLICY_ID = os.environ["POLICY_ID"]
 PRIVATE_KEY = SigningKey(bytes.fromhex(os.environ["SERVER_PRIVATE_KEY"]), encoder=RawEncoder)
