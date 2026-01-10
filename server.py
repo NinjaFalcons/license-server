@@ -12,8 +12,7 @@ app = FastAPI()
 
 
 KEYGEN_API_TOKEN = os.environ["KEYGEN_API_TOKEN"]
-
-KEYGEN_TOKEN = os.environ["KEYGEN_API_TOKEN"]    
+  
 
 ACCOUNT_ID = os.environ["ACCOUNT_ID"]
 POLICY_ID = os.environ["POLICY_ID"]
@@ -38,6 +37,71 @@ class LeaseRequest(BaseModel):
     license_key: str
     fingerprint: str
 
+class ActivateRequest(BaseModel):
+    license_key: str
+    fingerprint: str
+
+
+
+@app.post("/activate")
+def activate(req: ActivateRequest, request: Request):
+    ip = request.client.host if request.client else "unknown"
+    _rate_limit(ip)
+
+    # 1) Validate license WITHOUT fingerprint so it succeeds even on first run,
+    # and so we can get the license UUID (id).
+    j = _keygen_validate(req.license_key, fingerprint=None)
+
+    license_id = j["data"]["id"]
+    policy_id = j["data"]["relationships"]["policy"]["data"]["id"]
+
+    if policy_id != POLICY_ID:
+        raise HTTPException(403, detail={"code": "POLICY_MISMATCH", "detail": "Wrong policy"})
+
+    # Optional: enforce max machines (Keygen also enforces, but this gives nicer error)
+    machines_count = (
+        j["data"].get("relationships", {})
+              .get("machines", {})
+              .get("meta", {})
+              .get("count", 0)
+    )
+    max_machines = j["data"]["attributes"].get("maxMachines")
+    if isinstance(max_machines, int) and machines_count >= max_machines:
+        raise HTTPException(403, detail={"code": "MACHINE_LIMIT", "detail": "Machine limit exceeded"})
+
+    # 2) Create machine bound to the license
+    url = f"https://api.keygen.sh/v1/accounts/{ACCOUNT_ID}/machines"
+    payload = {
+        "data": {
+            "type": "machines",
+            "attributes": {"fingerprint": req.fingerprint},
+            "relationships": {
+                "license": {"data": {"type": "licenses", "id": license_id}}
+            },
+        }
+    }
+
+    r = requests.post(url, headers=KEYGEN_HEADERS, json=payload, timeout=10)
+
+    # 201 Created = new machine
+    if r.status_code in (200, 201):
+        return {"activated": True}
+
+    # 409 can happen if machine already exists / already activated (Keygen dependent)
+    if r.status_code == 409:
+        return {"activated": True}
+
+    # Otherwise bubble up Keygen error details
+    j2 = r.json() if r.headers.get("content-type", "").startswith("application") else {}
+    err = (j2.get("errors") or [{}])[0]
+    raise HTTPException(
+        403,
+        detail={
+            "code": err.get("code") or "ACTIVATION_FAILED",
+            "detail": err.get("detail") or "Activation failed",
+        },
+    )
+
 
 def _rate_limit(ip: str) -> None:
     now = time.time()
@@ -49,33 +113,53 @@ def _rate_limit(ip: str) -> None:
     _RATE[ip] = bucket
 
 
-def _keygen_validate(license_key: str, fingerprint: str) -> None:
-    """
-    Validates the license + subscription via Keygen.
-    Raises HTTPException if not allowed.
-    """
+def _keygen_validate(license_key: str, fingerprint: str | None):
     url = f"https://api.keygen.sh/v1/accounts/{ACCOUNT_ID}/licenses/actions/validate-key"
-    payload = {
-        "meta": {
-            "key": license_key,
-            "scope": {
-                "fingerprint": fingerprint,
-                "policy": POLICY_ID,  # enforce policy on Keygen side too
+    meta = {"key": license_key}
+    if fingerprint is not None:
+        meta["scope"] = {"fingerprint": fingerprint}
+    
+
+    r = requests.post(url, headers=KEYGEN_HEADERS, json={"meta": meta}, timeout=10)
+
+    # Keygen returns JSON even on 4xx
+    j = r.json() if r.headers.get("content-type", "").startswith("application") else {}
+    kg_meta = j.get("meta", {})
+    data = j.get("data", {})
+
+    # If not 200 or meta.valid false → fail with a structured error
+    if r.status_code != 200 or not kg_meta.get("valid", False):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": kg_meta.get("code") or "VALIDATION_FAILED",
+                "detail": kg_meta.get("detail") or "License validation failed",
+                "license_id": (data.get("id") if isinstance(data, dict) else None),
+                "policy_id": (
+                    data.get("relationships", {})
+                        .get("policy", {})
+                        .get("data", {})
+                        .get("id")
+                    if isinstance(data, dict) else None
+                ),
             },
-        }
-    }
+        )
 
-    r = requests.post(url, headers=KEYGEN_HEADERS, json=payload, timeout=10)
+    # Optional: enforce policy on server side too
+    policy_id = (
+        data.get("relationships", {})
+            .get("policy", {})
+            .get("data", {})
+            .get("id")
+    )
+    if policy_id and policy_id != POLICY_ID:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "POLICY_MISMATCH", "detail": "Wrong policy"},
+        )
 
-    if r.status_code != 200:
-        raise HTTPException(403, "Invalid license or subscription")
+    return j
 
-    j = r.json()
-    meta = j.get("meta", {})
-
-    # Keygen validate-key returns meta.valid when successful
-    if not meta.get("valid", False):
-        raise HTTPException(403, "Subscription inactive or expired")
 
 
 def _sign(payload: dict) -> dict:
