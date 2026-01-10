@@ -50,7 +50,8 @@ def activate(req: ActivateRequest, request: Request):
 
     # 1) Validate license WITHOUT fingerprint so it succeeds even on first run,
     # and so we can get the license UUID (id).
-    j = _keygen_validate(req.license_key, fingerprint=None)
+    j = _keygen_validate(req.license_key, fingerprint=req.fingerprint, allow_inactive=True)
+
 
     license_id = j["data"]["id"]
     policy_id = j["data"]["relationships"]["policy"]["data"]["id"]
@@ -113,7 +114,7 @@ def _rate_limit(ip: str) -> None:
     _RATE[ip] = bucket
 
 
-def _keygen_validate(license_key: str, fingerprint: str | None):
+def _keygen_validate(license_key: str, fingerprint: str | None, allow_inactive: bool = False):
     url = f"https://api.keygen.sh/v1/accounts/{ACCOUNT_ID}/licenses/actions/validate-key"
     meta = {"key": license_key}
     if fingerprint is not None:
@@ -127,8 +128,7 @@ def _keygen_validate(license_key: str, fingerprint: str | None):
     kg_meta = j.get("meta", {})
     data = j.get("data", {})
 
-    # If not 200 or meta.valid false → fail with a structured error
-    if r.status_code != 200 or not kg_meta.get("valid", False):
+    if r.status_code != 200:
         raise HTTPException(
             status_code=403,
             detail={
@@ -144,6 +144,25 @@ def _keygen_validate(license_key: str, fingerprint: str | None):
                 ),
             },
         )
+
+    # If valid is false, only raise if allow_inactive is False
+    if not kg_meta.get("valid", False) and not allow_inactive:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": kg_meta.get("code") or "VALIDATION_FAILED",
+                "detail": kg_meta.get("detail") or "License validation failed",
+                "license_id": (data.get("id") if isinstance(data, dict) else None),
+                "policy_id": (
+                    data.get("relationships", {})
+                        .get("policy", {})
+                        .get("data", {})
+                        .get("id")
+                    if isinstance(data, dict) else None
+                ),
+            },
+        )
+
 
     # Optional: enforce policy on server side too
     policy_id = (
